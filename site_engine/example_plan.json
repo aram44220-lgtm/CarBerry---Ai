@@ -1,0 +1,27 @@
+{
+  "site_type": "restaurant",
+  "theme": "noir_gold",
+  "font_pair": "editorial",
+  "sections": [
+    {"type": "navbar", "variant": "glass"},
+    {"type": "hero", "variant": "split_editorial"},
+    {"type": "stats", "variant": "minimal"},
+    {"type": "features", "variant": "bento"},
+    {"type": "gallery", "variant": "masonry"},
+    {"type": "testimonials", "variant": "editorial"},
+    {"type": "cta", "variant": "luxury"},
+    {"type": "footer", "variant": "minimal"}
+  ],
+  "content": {
+    "brand": "Luma",
+    "title": "An evening worth staying for.",
+    "subtitle": "A modern dining experience built around fire, seasonal ingredients and slow evenings.",
+    "primary_cta": "Reserve a table",
+    "secondary_cta": "Explore menu",
+    "eyebrow": "Restaurant · Yerevan",
+    "image": "https://images.unsplash.com/photo-1515003197210-e0cd71810b5f?auto=format&fit=crop&w=1600&q=85",
+    "image2": "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1200&q=85",
+    "email": "hello@luma.am",
+    "location": "Yerevan · Armenia"
+  }
+}

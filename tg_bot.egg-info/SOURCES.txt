@@ -1,0 +1,7 @@
+main.py
+pyproject.toml
+tg_bot.egg-info/PKG-INFO
+tg_bot.egg-info/SOURCES.txt
+tg_bot.egg-info/dependency_links.txt
+tg_bot.egg-info/requires.txt
+tg_bot.egg-info/top_level.txt

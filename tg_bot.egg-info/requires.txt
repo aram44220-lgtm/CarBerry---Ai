@@ -1,0 +1,6 @@
+aiogram
+fastapi
+openai
+pyngrok
+python-dotenv
+uvicorn[standard]

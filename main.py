@@ -66,7 +66,9 @@ def required_env(name: str) -> str:
 # ================= КОНФИГУРАЦИЯ =================
 BOT_TOKEN = required_env("BOT_TOKEN")
 GROQ_API_KEY = required_env("GROQ_API_KEY")
-NGROK_AUTH_TOKEN = _clean_env(os.getenv("NGROK_AUTH_TOKEN"))
+# WEBAPP_URL: публичный домен для Mini App кнопок (Railway, VPS, ngrok и т.д.)
+_raw_webapp_url = _clean_env(os.getenv("WEBAPP_URL", "https://carberry-ai-production.up.railway.app"))
+WEBAPP_URL = _raw_webapp_url.rstrip("/")  # гарантируем без trailing slash
 AI_MODEL = _clean_env(os.getenv("AI_MODEL")) or "llama-3.1-8b-instant"
 _RAW_PORT = _clean_env(os.getenv("PORT"))
 try:
@@ -228,7 +230,8 @@ USER_LAST_REQUEST: dict[int, float] = {}
 SITE_PLANS: dict[str, dict] = {}
 # Tracks last generated site app_id per user_id
 USER_LAST_SITE: dict[int, str] = {}
-PUBLIC_URL = ""
+# PUBLIC_URL задаётся сразу из env — ngrok больше не нужен
+PUBLIC_URL = WEBAPP_URL
 
 
 def _now_iso() -> str:
@@ -288,128 +291,12 @@ def _stat_rate(s: dict) -> str:
 
 
 # ================= FASTAPI (ВЕБ-СЕРВЕР) =================
-async def _start_ngrok_subprocess(port: int, auth_token: str) -> tuple[str, object]:
-    import subprocess as _sp
-    import json as _json
-    import urllib.request as _ur
-
-    project_dir = os.path.dirname(os.path.abspath(__file__))
-    ngrok_exe = os.path.join(project_dir, "ngrok_bin", "ngrok.exe")
-    if not os.path.isfile(ngrok_exe):
-        fallback = os.path.join(project_dir, ".venv", "Scripts", "ngrok.exe")
-        if os.path.isfile(fallback):
-            ngrok_exe = fallback
-        else:
-            raise RuntimeError(f"ngrok.exe не найден ни в {ngrok_exe} ни в {fallback}")
-
-    config_dir = os.path.join(project_dir, "ngrok_bin")
-    os.makedirs(config_dir, exist_ok=True)
-    log_path = os.path.join(config_dir, "ngrok_last.log")
-
-    env = os.environ.copy()
-    env["NGROK_CONFIG_DIR"] = config_dir
-    env["TEMP"] = config_dir
-    env["TMP"] = config_dir
-
-    if sys.platform.startswith("win"):
-        try:
-            _sp.run(
-                ["taskkill", "/F", "/IM", "ngrok.exe", "/T"],
-                capture_output=True,
-                timeout=5,
-                check=False,
-            )
-            await asyncio.sleep(1)
-        except Exception:
-            pass
-
-    try:
-        _log_f = open(log_path, "w", encoding="utf-8", errors="replace")
-    except Exception:
-        _log_f = _sp.DEVNULL
-
-    cmd = [
-        ngrok_exe, "http", str(port),
-        "--log=stdout",
-        "--authtoken", auth_token,
-    ]
-    proc = _sp.Popen(
-        cmd,
-        stdout=_log_f,
-        stderr=_sp.STDOUT,
-        text=True,
-        env=env,
-        cwd=project_dir,
-        creationflags=_sp.CREATE_NO_WINDOW if hasattr(_sp, "CREATE_NO_WINDOW") else 0,
-    )
-
-    api_ports = (4040, 4041, 4042, 4043)
-    public_url: str | None = None
-    deadline = time.time() + 45
-    last_err: str | None = None
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            outs = ""
-            try:
-                with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                    outs = f.read()[:600]
-            except Exception:
-                pass
-            raise RuntimeError(f"ngrok завершился раньше времени. Вывод: {outs}")
-        for ap in api_ports:
-            api_url = f"http://127.0.0.1:{ap}/api/tunnels"
-            try:
-                with _ur.urlopen(api_url, timeout=2) as r:
-                    payload = _json.loads(r.read().decode("utf-8"))
-                    tunnels = payload.get("tunnels", []) if isinstance(payload, dict) else []
-                    for t in tunnels:
-                        if not isinstance(t, dict):
-                            continue
-                        url = t.get("public_url") or ""
-                        if url.startswith("https://"):
-                            public_url = url
-                            break
-                    if public_url is None:
-                        for t in tunnels:
-                            url = (t or {}).get("public_url") or ""
-                            if url.startswith("http://"):
-                                public_url = url.replace("http://", "https://", 1)
-                                break
-            except Exception as e:
-                last_err = f"port {ap}: {e}"
-            if public_url:
-                break
-        if public_url:
-            break
-        await asyncio.sleep(1.2)
-
-    if not public_url:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        raise RuntimeError(f"Не удалось дождаться ngrok туннеля. Последняя ошибка API: {last_err}")
-
-    return public_url, proc
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global PUBLIC_URL
-    ngrok_proc = None
     stop_event = asyncio.Event()
-
-    if NGROK_AUTH_TOKEN:
-        try:
-            PUBLIC_URL, ngrok_proc = await _start_ngrok_subprocess(PORT, NGROK_AUTH_TOKEN)
-            logger.info("HTTPS Туннель запущен: %s", PUBLIC_URL)
-        except Exception as e:
-            logger.warning("Не удалось запустить ngrok: %s", e)
-            PUBLIC_URL = ""
-            ngrok_proc = None
-            logger.warning("Ngrok не запущен. Mini App кнопка не будет работать.")
-    else:
-        logger.warning("NGROK_AUTH_TOKEN не задан. Mini App кнопка не будет работать.")
+    logger.info("🌍 Публичный URL (Mini App): %s", PUBLIC_URL)
 
     await _check_bot_token_once()
 
@@ -463,15 +350,7 @@ async def lifespan(app: FastAPI):
             await polling_task
         except (asyncio.CancelledError, Exception):
             logger.debug("Polling loop завершён")
-        if ngrok_proc is not None:
-            try:
-                ngrok_proc.kill()
-            except Exception:
-                pass
-            try:
-                ngrok_proc.wait(timeout=3)
-            except Exception:
-                pass
+        # ngrok не используется — ничего не убиваем
         try:
             await bot.session.close()
         except Exception:
@@ -2148,7 +2027,8 @@ HELP_TEXT = (
     "🔧 <b>Если что-то сломалось:</b>\n"
     "  1. Перезапусти бота командой <code>/start</code>\n"
     "  2. Если ошибка API с текстом — подожди 1–2 минуты\n"
-    "  3. Если кнопка Mini App не открывается — проверь что ngrok запущен (виден в консоли при старте)"
+    "  3. Если кнопка Mini App не открывается — убедись, что переменная окружения "
+    "<code>WEBAPP_URL</code> задана правильно (Railway автоматически пробрасывает HTTPS)"
 )
 
 
@@ -2310,20 +2190,16 @@ async def serve_ready_template(message_obj: types.Message | types.CallbackQuery,
         "• URL вечный — /app/{template_id} — кэш шаблонов НИКОГДА не протухает"
     )
 
-    if PUBLIC_URL:
-        sep_url = "&" if "?" in PUBLIC_URL else "?"
-        web_app_url = f"{PUBLIC_URL}/app/{template_id}{sep_url}ngrok-skip-browser-warning=1&utm_source=tg_mini_app&tpl={template_id}"
-        browser_url = f"{PUBLIC_URL}/app/{template_id}{sep_url}ngrok-skip-browser-warning=1"
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text="🚀 Открыть Mini App",
-                web_app=WebAppInfo(url=web_app_url),
-            )],
-            [InlineKeyboardButton(text="🌐 Открыть в браузере", url=browser_url)],
-        ])
-    else:
-        keyboard = None
-        caption += "\n\n⚠️ Ngrok не запущен — кнопка Mini App скрыта. Скачай HTML-файл и открой локально, или перезапусти бота с настроенным ngrok."
+    sep_url = "&" if "?" in PUBLIC_URL else "?"
+    web_app_url = f"{PUBLIC_URL}/app/{template_id}{sep_url}utm_source=tg_mini_app&tpl={template_id}"
+    browser_url = f"{PUBLIC_URL}/app/{template_id}"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🚀 Открыть Mini App",
+            web_app=WebAppInfo(url=web_app_url),
+        )],
+        [InlineKeyboardButton(text="🌐 Открыть в браузере", url=browser_url)],
+    ])
 
     file_bytes = html_code.encode("utf-8")
     safe_title = re.sub(r"[^\w\-\sа-яА-ЯёЁ]", "", title, flags=re.UNICODE).strip() or template_id
@@ -3045,21 +2921,17 @@ async def _generate_website(
         callback_data=f"edit_site:{app_id}",
     )
 
-    if PUBLIC_URL:
-        sep_url = "&" if "?" in PUBLIC_URL else "?"
-        web_app_url = f"{PUBLIC_URL}/preview/{app_id}{sep_url}ngrok-skip-browser-warning=1&utm_source=tg_mini_app"
-        browser_url = f"{PUBLIC_URL}/preview/{app_id}{sep_url}ngrok-skip-browser-warning=1"
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text="🚀 Открыть Mini App",
-                web_app=WebAppInfo(url=web_app_url),
-            )],
-            [InlineKeyboardButton(text="🌐 Открыть в браузере", url=browser_url)],
-            [edit_btn],
-        ])
-    else:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[edit_btn]])
-        caption += "\n\n⚠️ Ngrok не настроен — кнопка Mini App недоступна."
+    sep_url = "&" if "?" in PUBLIC_URL else "?"
+    web_app_url = f"{PUBLIC_URL}/preview/{app_id}{sep_url}utm_source=tg_mini_app"
+    browser_url = f"{PUBLIC_URL}/preview/{app_id}"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🚀 Открыть Mini App",
+            web_app=WebAppInfo(url=web_app_url),
+        )],
+        [InlineKeyboardButton(text="🌐 Открыть в браузере", url=browser_url)],
+        [edit_btn],
+    ])
 
     file = types.BufferedInputFile(
         html_code.encode("utf-8"),
@@ -3261,23 +3133,19 @@ BUILD IT NOW. Start your response with <!DOCTYPE html> immediately."""
         if used_model.lower() != AI_MODEL.lower():
             caption += f"\n\nℹ️ Модель: <code>{_safe_html(used_model)}</code>"
 
-        if PUBLIC_URL:
-            sep_url = "&" if "?" in PUBLIC_URL else "?"
-            web_app_url = f"{PUBLIC_URL}/preview/{app_id}{sep_url}ngrok-skip-browser-warning=1&utm_source=tg_mini_app"
-            browser_url = f"{PUBLIC_URL}/preview/{app_id}{sep_url}ngrok-skip-browser-warning=1"
-            
-            edit_btn_text = "✏️ Изменить игру" if is_game else "✏️ Изменить приложение"
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(
-                    text="🚀 Открыть Mini App",
-                    web_app=WebAppInfo(url=web_app_url),
-                )],
-                [InlineKeyboardButton(text="🌐 Открыть в браузере", url=browser_url)],
-                [InlineKeyboardButton(text=edit_btn_text, callback_data=f"edit_site:{app_id}")],
-            ])
-        else:
-            keyboard = None
-            caption += "\n\n⚠️ Ngrok не настроен — кнопка Mini App недоступна."
+        sep_url = "&" if "?" in PUBLIC_URL else "?"
+        web_app_url = f"{PUBLIC_URL}/preview/{app_id}{sep_url}utm_source=tg_mini_app"
+        browser_url = f"{PUBLIC_URL}/preview/{app_id}"
+        
+        edit_btn_text = "✏️ Изменить игру" if is_game else "✏️ Изменить приложение"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🚀 Открыть Mini App",
+                web_app=WebAppInfo(url=web_app_url),
+            )],
+            [InlineKeyboardButton(text="🌐 Открыть в браузере", url=browser_url)],
+            [InlineKeyboardButton(text=edit_btn_text, callback_data=f"edit_site:{app_id}")],
+        ])
 
         file_bytes = code.encode("utf-8")
         ext_label = "game" if is_game else "app"
@@ -3489,20 +3357,17 @@ async def _edit_website(
         callback_data=f"edit_site:{new_app_id}",
     )
 
-    if PUBLIC_URL:
-        sep_url = "&" if "?" in PUBLIC_URL else "?"
-        web_app_url = f"{PUBLIC_URL}/preview/{new_app_id}{sep_url}ngrok-skip-browser-warning=1&utm_source=tg_mini_app"
-        browser_url = f"{PUBLIC_URL}/preview/{new_app_id}{sep_url}ngrok-skip-browser-warning=1"
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text="🚀 Открыть Mini App",
-                web_app=WebAppInfo(url=web_app_url),
-            )],
-            [InlineKeyboardButton(text="🌐 Открыть в браузере", url=browser_url)],
-            [edit_btn],
-        ])
-    else:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[edit_btn]])
+    sep_url = "&" if "?" in PUBLIC_URL else "?"
+    web_app_url = f"{PUBLIC_URL}/preview/{new_app_id}{sep_url}utm_source=tg_mini_app"
+    browser_url = f"{PUBLIC_URL}/preview/{new_app_id}"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🚀 Открыть Mini App",
+            web_app=WebAppInfo(url=web_app_url),
+        )],
+        [InlineKeyboardButton(text="🌐 Открыть в браузере", url=browser_url)],
+        [edit_btn],
+    ])
 
     file_obj = types.BufferedInputFile(
         new_html.encode("utf-8"),
@@ -3568,23 +3433,19 @@ async def _edit_app_legacy(
         if used_model.lower() != AI_MODEL.lower():
             caption += f"\n\nℹ️ Модель: <code>{_safe_html(used_model)}</code>"
 
-        if PUBLIC_URL:
-            sep_url = "&" if "?" in PUBLIC_URL else "?"
-            web_app_url = f"{PUBLIC_URL}/preview/{new_app_id}{sep_url}ngrok-skip-browser-warning=1&utm_source=tg_mini_app"
-            browser_url = f"{PUBLIC_URL}/preview/{new_app_id}{sep_url}ngrok-skip-browser-warning=1"
-            
-            edit_btn_text = "✏️ Изменить ещё"
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(
-                    text="🚀 Открыть Mini App",
-                    web_app=WebAppInfo(url=web_app_url),
-                )],
-                [InlineKeyboardButton(text="🌐 Открыть в браузере", url=browser_url)],
-                [InlineKeyboardButton(text=edit_btn_text, callback_data=f"edit_site:{new_app_id}")],
-            ])
-        else:
-            keyboard = None
-            caption += "\n\n⚠️ Ngrok не настроен — кнопка Mini App недоступна."
+        sep_url = "&" if "?" in PUBLIC_URL else "?"
+        web_app_url = f"{PUBLIC_URL}/preview/{new_app_id}{sep_url}utm_source=tg_mini_app"
+        browser_url = f"{PUBLIC_URL}/preview/{new_app_id}"
+        
+        edit_btn_text = "✏️ Изменить ещё"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🚀 Открыть Mini App",
+                web_app=WebAppInfo(url=web_app_url),
+            )],
+            [InlineKeyboardButton(text="🌐 Открыть в браузере", url=browser_url)],
+            [InlineKeyboardButton(text=edit_btn_text, callback_data=f"edit_site:{new_app_id}")],
+        ])
 
         file_bytes = code.encode("utf-8")
         ext_label = "game" if plan.get("__type") == "game" else "app"

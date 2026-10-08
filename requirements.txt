@@ -1,0 +1,7 @@
+aiogram
+python-telegram-bot
+python-dotenv
+groq
+requests
+fastapi
+uvicorn

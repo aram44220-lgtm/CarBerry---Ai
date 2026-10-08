@@ -1,7 +1,7 @@
 aiogram
-python-telegram-bot
 python-dotenv
+openai
 groq
-requests
 fastapi
 uvicorn
+requests
